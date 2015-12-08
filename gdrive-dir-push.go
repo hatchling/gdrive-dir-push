@@ -13,10 +13,11 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	drive "google.golang.org/api/drive/v2"
 
 	"github.com/hatchling/gdrive-dir-push/directory_tree"
 	"github.com/hatchling/gdrive-dir-push/oauth"
+	// Using a forked copy to allow setting chunk size
+	drive "github.com/hatchling/google-api-go-client/drive/v2"
 )
 
 func init() {
