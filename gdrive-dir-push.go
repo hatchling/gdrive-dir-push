@@ -13,16 +13,17 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	drive "google.golang.org/api/drive/v2"
 
 	"github.com/hatchling/gdrive-dir-push/directory_tree"
 	"github.com/hatchling/gdrive-dir-push/oauth"
-	// Using a forked copy to allow setting chunk size
-	drive "github.com/hatchling/google-api-go-client/drive/v2"
+	"github.com/hatchling/try"
 )
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 	log.SetOutput(os.Stdout)
+	try.MaxRetries = 3
 }
 
 const (
@@ -72,10 +73,21 @@ func (p *pusher) listFolder(parentID string) ([]*drive.File, error) {
 		if pageToken != "" {
 			call.PageToken(pageToken)
 		}
-		r, err := call.Do()
-		if err != nil {
+
+		// Wrap in a simple retry loop since Drive can be unreliable.
+		var r *drive.FileList
+		if err := try.Do(func(attempt int) (bool, error) {
+			var err error
+			r, err = call.Do()
+			if err != nil {
+				log.Print(err)
+				time.Sleep(time.Second)
+			}
+			return attempt < try.MaxRetries, err
+		}); err != nil {
 			return nil, fmt.Errorf("Unable to list files: %v", err)
 		}
+
 		files = append(files, r.Items...)
 		pageToken = r.NextPageToken
 		if pageToken == "" {
@@ -99,8 +111,18 @@ func (p *pusher) createFolder(title, parentID string) (string, error) {
 			&drive.ParentReference{Id: parentID},
 		},
 	}
-	r, err := p.drv.Files.Insert(newFolder).Do()
-	if err != nil {
+
+	// Wrap in a simple retry loop since Drive can be unreliable.
+	var r *drive.File
+	if err := try.Do(func(attempt int) (bool, error) {
+		var err error
+		r, err = p.drv.Files.Insert(newFolder).Do()
+		if err != nil {
+			log.Print(err)
+			time.Sleep(time.Second)
+		}
+		return attempt < try.MaxRetries, err
+	}); err != nil {
 		return "", fmt.Errorf("Problem creating new GDrive folder: %v", err)
 	}
 	return r.Id, nil
@@ -114,12 +136,31 @@ func (p *pusher) relocateFile(fileID, oldParentID string) error {
 		fmt.Printf("relocateFile(%s, %s)\n", fileID, oldParentID)
 	}
 	parentRef := &drive.ParentReference{Id: *oldFilesDir}
-	if _, err := p.drv.Parents.Insert(fileID, parentRef).Do(); err != nil {
+
+	// Wrap in a simple retry loop since Drive can be unreliable.
+	if err := try.Do(func(attempt int) (bool, error) {
+		_, err := p.drv.Parents.Insert(fileID, parentRef).Do()
+		if err != nil {
+			log.Print(err)
+			time.Sleep(time.Second)
+		}
+		return attempt < try.MaxRetries, err
+	}); err != nil {
 		return fmt.Errorf("An Insert() error occurred: %v", err)
 	}
-	if err := p.drv.Parents.Delete(fileID, oldParentID).Do(); err != nil {
+
+	// Wrap in a simple retry loop since Drive can be unreliable.
+	if err := try.Do(func(attempt int) (bool, error) {
+		err := p.drv.Parents.Delete(fileID, oldParentID).Do()
+		if err != nil {
+			log.Print(err)
+			time.Sleep(time.Second)
+		}
+		return attempt < try.MaxRetries, err
+	}); err != nil {
 		return fmt.Errorf("A Delete() error occurred: %v", err)
 	}
+
 	return nil
 }
 
@@ -129,10 +170,6 @@ func (p *pusher) createFile(ctx context.Context, localFile *directory_tree.Node,
 	tallyOp()
 	if *verbose {
 		fmt.Printf("createFile(%v, %s)", localFile, parentID)
-	}
-	file, err := os.Open(localFile.FullPath)
-	if err != nil {
-		log.Fatal(err)
 	}
 	title := filepath.Base(localFile.FullPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(title))
@@ -147,8 +184,25 @@ func (p *pusher) createFile(ctx context.Context, localFile *directory_tree.Node,
 	}
 
 	// TODO print info about the transfer
-	r, err := p.drv.Files.Insert(f).ResumableMedia(ctx, file, localFile.Info.Size, mimeType).Do()
-	if err != nil {
+
+	// Wrap in a simple retry loop since Drive can be unreliable.
+	var r *drive.File
+	if err := try.Do(func(attempt int) (bool, error) {
+		var err error
+
+		file, err := os.Open(localFile.FullPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+
+		r, err = p.drv.Files.Insert(f).Media(file).Do()
+		if err != nil {
+			log.Print(err)
+			time.Sleep(time.Second)
+		}
+		return attempt < try.MaxRetries, err
+	}); err != nil {
 		return "", fmt.Errorf("An error occurred uploading the file: %v\n", err)
 	}
 	return r.Id, nil
